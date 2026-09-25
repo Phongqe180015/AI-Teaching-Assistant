@@ -1,0 +1,1688 @@
+﻿commit c5208452eb0e8a4bdc1d0a692eda387aead9bd8a
+Author: Nguyß╗àn Quß╗æc ─Éß║ít <nten6205@gmail.com>
+Date:   Fri Jul 10 20:49:30 2026 +0700
+
+    feat: add semester and class management with student import functionality
+
+diff --git a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+index 95db147..12665da 100644
+--- a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
++++ b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs'
+ import * as xlsx from 'xlsx'
+ import crypto from 'crypto'
+ import { CloudinaryService } from '../../../../shared/infrastructure/services/cloudinary.service.js'
++import { detectSeasonFromFilename, SeasonDetectorError, matchesSeason } from '../../../../shared/utils/season-detector.util.js'
+ 
+ import { IEmailService } from '../../../../shared/application/email.service.interface.js'
+ import { AppError } from '../../../../shared/application/app.error.js'
+@@ -22,6 +23,8 @@ const HEADER_ALIASES: Record<string, string[]> = {
+     classCode: ['lß╗¢p hß╗ìc', 'lop hoc', 'class'],
+     outOfSemesterSubjects: ['m├┤n kh├íc kß╗│ hiß╗çn tß║íi (nß╗ú/hß╗ìc v╞░ß╗út)', 'm├┤n kh├íc k├¼ hiß╗çn tß║íi (nß╗ú/hß╗ìc v╞░ß╗út)', 'mon khac ky hien tai', 'out of semester subjects', 'nß╗ú/hß╗ìc v╞░ß╗út', 'kh├íc kß╗│', 'kh├íc k├¼'],
+     passedSubjects: ['m├┤n ─æ├ú hß╗ìc v╞░ß╗út th├ánh c├┤ng', 'mon da hoc vuot thanh cong', 'passed subjects', 'hß╗ìc v╞░ß╗út th├ánh c├┤ng', '─æ├ú hß╗ìc'],
++    // Cß╗Öt nß╗ú m├┤n ΓÇö d├╣ng ri├¬ng biß╗çt, lookup KH├öNG bß╗ï giß╗¢i hß║ín theo m├╣a hiß╗çn tß║íi
++    retakeSubjects: ['nß╗ú m├┤n', 'no mon', 'm├┤n nß╗ú', 'mon no', 'retake subjects', 'retake', 'subject debt', 'nß╗ú', 'debt subjects', 'm├┤n hß╗ìc nß╗ú', 'mon hoc no'],
+     avatar: ['avatar', 'ß║únh ─æß║íi diß╗çn', 'anh dai dien', 'h├¼nh ß║únh', 'hinh anh', 'ß║únh', 'anh'],
+ }
+ 
+@@ -46,7 +49,68 @@ export class ImportStudentsExcelUseCase {
+         let errorCount = 0
+         const errors: string[] = []
+ 
+-        // 1. Create ImportBatch record first
++        // 1. SEASON DETECTION: Extract season from filename before any processing
++        let detectedSeasonInfo
++        try {
++            detectedSeasonInfo = detectSeasonFromFilename(fileName)
++        } catch (err: any) {
++            const errorMsg = err instanceof SeasonDetectorError
++                ? err.message
++                : 'Kh├┤ng thß╗â x├íc ─æß╗ïnh m├╣a hß╗ìc tß╗½ t├¬n file'
++            throw new AppError('INVALID_SEASON', errorMsg, 400)
++        }
++
++        // 2. FIND TARGET SEMESTER: Get semesters for detected season.
++        // Uses matchesSeason() which handles all DB storage formats:
++        // 'Fall', 'Fall2026', 'Fall 2026', 'fall-2026', '2026Fall', etc.
++        const allSemesters = await prisma.semester.findMany()
++        const targetSemesters = allSemesters.filter(
++            s => matchesSeason(s.Season, detectedSeasonInfo)
++        )
++
++        if (targetSemesters.length === 0) {
++            // ΓöÇΓöÇ AUTO-CREATE SEASON ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++            // Season is not in the system yet. Create it automatically with 9
++            // semesters (Kß╗│ 1 ΓåÆ Kß╗│ 9) and auto-link the default subjects based on
++            // each subject's `Semester` attribute (same logic as SemesterRepository.createSeason).
++            console.log(`[Import] Season '${detectedSeasonInfo.formatted}' not found. Auto-creating season + semesters + subjects...`)
++            const { randomUUID } = await import('crypto')
++            const seasonLabel = detectedSeasonInfo.formatted  // e.g. "Spring 2026"
++
++            await prisma.$transaction(async (tx: any) => {
++                for (let i = 1; i <= 9; i++) {
++                    const semId = randomUUID()
++                    const code = `Kß╗│ ${i}`
++
++                    await tx.semester.create({
++                        data: {
++                            Id: semId,
++                            Code: code,
++                            Season: seasonLabel,
++                            IsActive: true,
++                            StartDate: null,
++                            EndDate: null
++                        }
++                    })
++
++                    // Auto-link subjects whose Semester == i
++                    const matchingSubjects = await tx.subject.findMany({
++                        where: { Semester: i },
++                        select: { Id: true }
++                    })
++                    if (matchingSubjects.length > 0) {
++                        await tx.semesterSubject.createMany({
++                            data: matchingSubjects.map((s: any) => ({ SemesterId: semId, SubjectId: s.Id }))
++                        })
++                    }
++
++                    targetSemesters.push({ Id: semId, Code: code, Season: seasonLabel, IsActive: true, StartDate: null, EndDate: null } as any)
++                }
++            })
++            console.log(`[Import] Auto-created season '${seasonLabel}' with 9 semesters successfully.`)
++        }
++
++        // 3. Create ImportBatch record
+         const batch = await prisma.importBatch.create({
+             data: {
+                 FileName: fileName,
+@@ -60,7 +124,7 @@ export class ImportStudentsExcelUseCase {
+         })
+ 
+         try {
+-            // 2. Parse Excel file
++            // 4. Parse Excel file
+             const workbook = xlsx.read(fileBuffer, { type: 'buffer' })
+             const sheetName = workbook.SheetNames[0]
+             if (!sheetName) {
+@@ -81,7 +145,7 @@ export class ImportStudentsExcelUseCase {
+             }
+ 
+             // Tracking for sync
+-            const processedClasses: Array<{ semesterCode?: string; classCode: string; subjectCode?: string; userId: string }> = []
++            const processedClasses: Array<{ semesterCode?: string; classCode: string; subjectCode?: string; userId: string; isRetake?: boolean }> = []
+ 
+             // Process row by row
+             for (let i = 0; i < rows.length; i++) {
+@@ -97,25 +161,27 @@ export class ImportStudentsExcelUseCase {
+                     const classCode = getField(row, 'classCode')
+                     const outOfSemesterStr = getField(row, 'outOfSemesterSubjects') || ''
+                     const passedStr = getField(row, 'passedSubjects') || ''
++                    // Cß╗Öt nß╗ú m├┤n ri├¬ng: lookup kh├┤ng giß╗¢i hß║ín m├╣a
++                    const retakeStr = getField(row, 'retakeSubjects') || ''
+                     const avatarUrlRaw = getField(row, 'avatar') || ''
+ 
+                     if (!mssv || !fullName || !email || !semesterCode || !classCode) {
+                         throw new Error('Thiß║┐u th├┤ng tin bß║»t buß╗Öc (MSSV, Hß╗ì v├á t├¬n, Email, Kß╗│ hß╗ìc, Lß╗¢p hß╗ìc)')
+                     }
+ 
+-                    // Resolve semesterCode to existing if fuzzy matched (e.g. "1" matches "Kß╗│ 1")
+-                    const allSemesters = await prisma.semester.findMany()
++                    // Fuzzy-match semesterCode against ONLY the target season's semesters
++                    // This prevents "Kß╗│ 1" from matching a semester in a different season
+                     const semesterNumberMatch = semesterCode.match(/\d+/)
+                     const semesterNumber = semesterNumberMatch ? parseInt(semesterNumberMatch[0], 10) : null
+-                    
+-                    const existingSemester = allSemesters.find(s => {
++
++                    const existingSemester = targetSemesters.find(s => {
+                         if (s.Code === semesterCode) return true
+                         if (s.Code?.toLowerCase() === semesterCode!.toLowerCase()) return true
+                         const sNumMatch = s.Code?.match(/\d+/)
+                         const sNum = sNumMatch ? parseInt(sNumMatch[0], 10) : null
+                         return sNum !== null && sNum === semesterNumber
+                     })
+-                    
++
+                     if (existingSemester && existingSemester.Code) {
+                         semesterCode = existingSemester.Code
+                     } else if (semesterNumberMatch) {
+@@ -182,11 +248,12 @@ export class ImportStudentsExcelUseCase {
+                     pendingEnrollments.push({
+                         UserId: user.Id,
+                         SemesterCode: semesterCode,
++                        Season: detectedSeasonInfo.formatted,
+                         ClassCode: classCode,
+                         SubjectCode: null,
+                     })
+ 
+-                    // Extra classes
++                    // Extra classes (hß╗ìc v╞░ß╗út / ngo├ái kß╗│) ΓÇö format: SubjectCode-ClassCode
+                     const extraClassesStrs = [
+                         ...outOfSemesterStr.split(',').map(s => s.trim()).filter(Boolean),
+                         ...passedStr.split(',').map(s => s.trim()).filter(Boolean)
+@@ -200,12 +267,34 @@ export class ImportStudentsExcelUseCase {
+                             pendingEnrollments.push({
+                                 UserId: user.Id,
+                                 SemesterCode: null,
++                                Season: detectedSeasonInfo.formatted,
+                                 ClassCode: clsCode,
+                                 SubjectCode: subjectCode,
+                             })
+                         }
+                     }
+ 
++                    // Nß╗ú m├┤n ΓÇö hß╗ù trß╗ú 2 format:
++                    //   1. SubjectCode-ClassCode  (vd: PRO232-SE17C01)
++                    //   2. SubjectCode only       (vd: PRO232) ΓåÆ tß╗▒ t├¼m class ph├╣ hß╗úp
++                    const retakeStrs = retakeStr.split(',').map((s: string) => s.trim()).filter(Boolean)
++                    for (const retakeEntry of retakeStrs) {
++                        const parts = retakeEntry.split('-')
++                        const subjectCode = parts[0].trim()
++                        const clsCode = parts.length >= 2 ? parts.slice(1).join('-').trim() : null
++                        pendingEnrollments.push({
++                            UserId: user.Id,
++                            SemesterCode: null,
++                            Season: detectedSeasonInfo.formatted,
++                            // ClassCode null = auto-find dß╗▒a tr├¬n Subject.Semester
++                            ClassCode: clsCode ?? '__RETAKE_AUTO__',
++                            SubjectCode: subjectCode,
++                            // ─É├ính dß║Ñu l├á retake ─æß╗â lookup kh├┤ng giß╗¢i hß║ín m├╣a
++                            IsRetake: true,
++                            RetakeClassCode: clsCode,
++                        })
++                    }
++
+                     // Tracking for sync
+                     if (semesterCode && classCode) {
+                         processedClasses.push({
+@@ -227,6 +316,20 @@ export class ImportStudentsExcelUseCase {
+                             })
+                         }
+                     }
++                    // Track retake classes ─æß╗â sync deletion KH├öNG nhß║ºm x├│a
++                    for (const retakeEntry of retakeStrs) {
++                        const parts = retakeEntry.split('-')
++                        const subjectCode = parts[0].trim()
++                        const clsCode = parts.length >= 2 ? parts.slice(1).join('-').trim() : null
++                        if (clsCode) {
++                            processedClasses.push({
++                                subjectCode,
++                                classCode: clsCode,
++                                userId: user.Id,
++                                isRetake: true,
++                            })
++                        }
++                    }
+ 
+                     // Create pending enrollments in DB (avoid exact duplicates)
+                     for (const pe of pendingEnrollments) {
+@@ -234,6 +337,7 @@ export class ImportStudentsExcelUseCase {
+                             where: {
+                                 UserId: pe.UserId,
+                                 SemesterCode: pe.SemesterCode,
++                                Season: pe.Season,
+                                 ClassCode: pe.ClassCode,
+                                 SubjectCode: pe.SubjectCode
+                             }
+@@ -247,25 +351,177 @@ export class ImportStudentsExcelUseCase {
+ 
+                     // Try to enroll immediately if classes exist
+                     const classesToEnroll: string[] = []
+-                    
+-                    // Main classes check
+-                    const semester = await prisma.semester.findFirst({ where: { Code: semesterCode } })
++
++                    // Precompute IDs of semesters belonging ONLY to the detected season.
++                    // This is the single source of truth used everywhere below to prevent
++                    // cross-season enrollment (e.g. a Fall2026 import must never touch Spring2026 classes).
++                    const targetSemesterIds = new Set(targetSemesters.map(s => s.Id))
++
++                    // ΓöÇΓöÇ Main class lookup ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++                    // Match semester by Code scoped to the detected season.
++                    const semester = targetSemesters.find(s => s.Code === semesterCode) ?? null
+ 
+                     if (semester) {
++                        const expectedSubjects = await (prisma as any).semesterSubject.findMany({
++                            where: { SemesterId: semester.Id },
++                            select: { SubjectId: true }
++                        });
++
+                         const classes = await prisma.class.findMany({
+-                            where: { SemesterId: semester.Id, ClassCode: classCode },
+-                            include: { Subject: true }
++                            where: {
++                                SemesterId: semester.Id,
++                                ClassCode: classCode
++                            },
++                            select: { Id: true, SubjectId: true }
+                         })
++
++                        const existingSubjectIds = new Set(classes.map(c => c.SubjectId))
++
++                        // Auto-create missing classes
++                        for (const es of expectedSubjects) {
++                            if (!existingSubjectIds.has(es.SubjectId)) {
++                                const newClass = await prisma.class.create({
++                                    data: {
++                                        ClassCode: classCode,
++                                        SubjectId: es.SubjectId,
++                                        SemesterId: semester.Id,
++                                        Status: 'Active'
++                                    }
++                                })
++                                classesToEnroll.push(newClass.Id)
++                                existingSubjectIds.add(es.SubjectId)
++                            }
++                        }
++
+                         classesToEnroll.push(...classes.map(c => c.Id))
+                     }
+ 
+-                    // Extra classes check
++                    // ΓöÇΓöÇ Extra classes lookup (hß╗ìc v╞░ß╗út / ngo├ái kß╗│) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++                    // Vß║½n giß╗¢i hß║ín targetSemesterIds cho extraClasses b├¼nh th╞░ß╗¥ng
++                    // v├¼ ch├║ng thuß╗Öc c├╣ng m├╣a (cross-season prevention).
+                     for (const pe of pendingEnrollments) {
+-                        if (pe.SubjectCode && pe.ClassCode) {
+-                            const cls = await prisma.class.findFirst({
+-                                where: { ClassCode: pe.ClassCode, Subject: { SubjectCode: pe.SubjectCode } }
++                        // Bß╗Å qua c├íc entry retake ΓÇö sß║╜ xß╗¡ l├╜ ri├¬ng b├¬n d╞░ß╗¢i
++                        if ((pe as any).IsRetake) continue
++                        if (!pe.SubjectCode || !pe.ClassCode) continue
++
++                        let cls = await prisma.class.findFirst({
++                            where: {
++                                ClassCode: pe.ClassCode,
++                                Subject: { SubjectCode: pe.SubjectCode },
++                                SemesterId: { in: Array.from(targetSemesterIds) }
++                            },
++                            select: { Id: true }
++                        })
++
++                        if (!cls) {
++                            const targetSubj = await prisma.subject.findUnique({
++                                where: { SubjectCode: pe.SubjectCode }
+                             })
++
++                            if (targetSubj) {
++                                const semSubj = await (prisma as any).semesterSubject.findFirst({
++                                    where: {
++                                        SubjectId: targetSubj.Id,
++                                        SemesterId: { in: Array.from(targetSemesterIds) }
++                                    }
++                                })
++
++                                if (semSubj) {
++                                    cls = await prisma.class.create({
++                                        data: {
++                                            ClassCode: pe.ClassCode,
++                                            SubjectId: targetSubj.Id,
++                                            SemesterId: semSubj.SemesterId,
++                                            Status: 'Active'
++                                        }
++                                    })
++                                }
++                            }
++                        }
++
++                        if (cls) classesToEnroll.push(cls.Id)
++                    }
++
++                    // ΓöÇΓöÇ Nß╗ú m├┤n lookup ΓÇö KH├öNG giß╗¢i hß║ín m├╣a ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++                    // M├┤n nß╗ú thuß╗Öc kß╗│/m├╣a c┼⌐ h╞ín ΓåÆ phß║úi t├¼m tr├¬n to├án bß╗Ö DB.
++                    for (const pe of pendingEnrollments) {
++                        if (!(pe as any).IsRetake || !pe.SubjectCode) continue
++
++                        const retakeClassCode = (pe as any).RetakeClassCode as string | null
++
++                        if (retakeClassCode) {
++                            // Format 1: SubjectCode-ClassCode ΓåÆ t├¼m ch├¡nh x├íc theo class code + subject
++                            let cls = await prisma.class.findFirst({
++                                where: {
++                                    ClassCode: retakeClassCode,
++                                    Subject: { SubjectCode: pe.SubjectCode },
++                                },
++                                select: { Id: true, SemesterId: true }
++                            })
++
++                            if (!cls) {
++                                // Auto-create: t├¼m subject ΓåÆ t├¼m SemesterSubject bß║Ñt kß╗│ (╞░u ti├¬n m├╣a hiß╗çn tß║íi)
++                                const retakeSubj = await prisma.subject.findUnique({
++                                    where: { SubjectCode: pe.SubjectCode }
++                                })
++
++                                if (retakeSubj) {
++                                    // ╞»u ti├¬n SemesterSubject trong m├╣a hiß╗çn tß║íi, fallback sang m├╣a kh├íc
++                                    let semSubj = await (prisma as any).semesterSubject.findFirst({
++                                        where: {
++                                            SubjectId: retakeSubj.Id,
++                                            SemesterId: { in: Array.from(targetSemesterIds) }
++                                        }
++                                    })
++                                    if (!semSubj) {
++                                        semSubj = await (prisma as any).semesterSubject.findFirst({
++                                            where: { SubjectId: retakeSubj.Id },
++                                            orderBy: { AssignedAt: 'desc' }
++                                        })
++                                    }
++
++                                    if (semSubj) {
++                                        cls = await prisma.class.create({
++                                            data: {
++                                                ClassCode: retakeClassCode,
++                                                SubjectId: retakeSubj.Id,
++                                                SemesterId: semSubj.SemesterId,
++                                                Status: 'Active'
++                                            }
++                                        })
++                                        console.log(`[Import][Retake] Auto-created class '${retakeClassCode}' cho m├┤n nß╗ú '${pe.SubjectCode}'`)
++                                    } else {
++                                        console.warn(`[Import][Retake] Kh├┤ng t├¼m thß║Ñy SemesterSubject cho m├┤n '${pe.SubjectCode}' ΓÇö bß╗Å qua`)
++                                    }
++                                }
++                            }
++
+                             if (cls) classesToEnroll.push(cls.Id)
++                        } else {
++                            // Format 2: Chß╗ë SubjectCode ΓåÆ tß╗▒ t├¼m class theo Subject.Semester
++                            const retakeSubj = await prisma.subject.findUnique({
++                                where: { SubjectCode: pe.SubjectCode },
++                                select: { Id: true, Semester: true }
++                            })
++
++                            if (retakeSubj) {
++                                // T├¼m class ph├╣ hß╗úp nhß║Ñt: c├╣ng SubjectId, ╞░u ti├¬n m├╣a c├│ enrollments
++                                const existingCls = await prisma.class.findFirst({
++                                    where: {
++                                        SubjectId: retakeSubj.Id,
++                                        ClassCode: classCode,   // d├╣ng class code ch├¡nh
++                                    },
++                                    orderBy: { Id: 'desc' },
++                                    select: { Id: true }
++                                })
++
++                                if (existingCls) {
++                                    classesToEnroll.push(existingCls.Id)
++                                    console.log(`[Import][Retake-Auto] T├¼m thß║Ñy class cho m├┤n '${pe.SubjectCode}': ${existingCls.Id}`)
++                                } else {
++                                    console.warn(`[Import][Retake-Auto] Kh├┤ng t├¼m thß║Ñy class cho m├┤n '${pe.SubjectCode}' vß╗¢i classCode '${classCode}' ΓÇö bß╗Å qua`)
++                                }
++                            }
+                         }
+                     }
+ 
+@@ -277,8 +533,8 @@ export class ImportStudentsExcelUseCase {
+                     for (const classId of uniqueClassesToEnroll) {
+                         const cls = await prisma.class.findUnique({
+                             where: { Id: classId },
+-                            include: { 
+-                                Subject: true, 
++                            include: {
++                                Subject: true,
+                                 Semester: true,
+                                 InstructorClass: {
+                                     include: { User: true }
+@@ -287,26 +543,29 @@ export class ImportStudentsExcelUseCase {
+                         })
+                         if (cls) {
+                             if (cls.SubjectId && cls.SemesterId) {
+-                                // Find and remove any existing class for this user in the same subject and semester
+-                                const oldClasses = await prisma.studentClass.findMany({
+-                                    where: {
+-                                        UserId: user.Id,
+-                                        Class: {
+-                                            SubjectId: cls.SubjectId,
+-                                            SemesterId: cls.SemesterId,
+-                                            Id: { not: classId }
++                                // Remove duplicate enrollments for same subject+semester,
++                                // but ONLY within the detected season's semesters.
++                                // Never touch enrollments in other seasons (Spring, Winter, etc.)
++                                if (targetSemesterIds.has(cls.SemesterId)) {
++                                    const oldClasses = await prisma.studentClass.findMany({
++                                        where: {
++                                            UserId: user.Id,
++                                            Class: {
++                                                SubjectId: cls.SubjectId,
++                                                SemesterId: cls.SemesterId,
++                                                Id: { not: classId }
++                                            }
+                                         }
+-                                    }
+-                                });
+-                                for (const old of oldClasses) {
+-                                    await prisma.studentClass.delete({
+-                                        where: { UserId_ClassId: { UserId: user.Id, ClassId: old.ClassId } }
+-                                    });
+-                                    // Also migrate submissions just like in update-user
+-                                    await prisma.submission.updateMany({
+-                                        where: { StudentId: user.Id, ClassId: old.ClassId },
+-                                        data: { ClassId: classId }
+                                     });
++                                    for (const old of oldClasses) {
++                                        await prisma.studentClass.delete({
++                                            where: { UserId_ClassId: { UserId: user.Id, ClassId: old.ClassId } }
++                                        });
++                                        await prisma.submission.updateMany({
++                                            where: { StudentId: user.Id, ClassId: old.ClassId },
++                                            data: { ClassId: classId }
++                                        });
++                                    }
+                                 }
+                             }
+ 
+@@ -343,7 +602,7 @@ export class ImportStudentsExcelUseCase {
+                                 where: peQuery,
+                                 data: { Status: 'Enrolled' }
+                             })
+-                            
++
+                             const peQuery2: any = {
+                                 UserId: user.Id,
+                                 ClassCode: cls.ClassCode,
+@@ -359,7 +618,7 @@ export class ImportStudentsExcelUseCase {
+                     }
+ 
+                     // 6. Send Email Notifications
+-                    
++
+                     // 6.1. Send Account Creation Email if new user
+                     if (rawPassword) {
+                         await this.emailService.sendEmail(
+@@ -406,20 +665,33 @@ export class ImportStudentsExcelUseCase {
+             }
+ 
+             // --- SYNC DELETION LOGIC ---
++            // Only touches classes that belong to the detected season (targetSemesterIds).
++            // Classes from other seasons (e.g. Spring) are never modified.
+             try {
+                 const classRosters = new Map<string, Set<string>>()
+-                
++                const targetSemesterIds = new Set(targetSemesters.map(s => s.Id))
++
+                 for (const pc of processedClasses) {
+                     let clsId: string | null = null
+                     if (pc.semesterCode && pc.classCode) {
+-                        const semester = await prisma.semester.findFirst({ where: { Code: pc.semesterCode } })
++                        // Scope semester lookup to the detected season
++                        const semester = targetSemesters.find(s => s.Code === pc.semesterCode) ?? null
+                         if (semester) {
+-                            const cls = await prisma.class.findFirst({ where: { SemesterId: semester.Id, ClassCode: pc.classCode } })
++                            const cls = await prisma.class.findFirst({
++                                where: { SemesterId: semester.Id, ClassCode: pc.classCode }
++                            })
+                             if (cls) clsId = cls.Id
+                         }
+                     } else if (pc.subjectCode && pc.classCode) {
++                        // Retake classes KH├öNG giß╗¢i hß║ín m├╣a ΓÇö t├¼m to├án DB theo SubjectCode + ClassCode
++                        // Extra classes b├¼nh th╞░ß╗¥ng vß║½n t├¼m trong targetSemesterIds
++                        const isRetakeEntry = (pc as any).isRetake === true
+                         const cls = await prisma.class.findFirst({
+-                            where: { ClassCode: pc.classCode, Subject: { SubjectCode: pc.subjectCode } }
++                            where: {
++                                ClassCode: pc.classCode,
++                                Subject: { SubjectCode: pc.subjectCode },
++                                ...(!isRetakeEntry && { SemesterId: { in: Array.from(targetSemesterIds) } })
++                            }
+                         })
+                         if (cls) clsId = cls.Id
+                     }
+@@ -446,7 +718,7 @@ export class ImportStudentsExcelUseCase {
+                         await prisma.studentClass.deleteMany({
+                             where: { ClassId: classId, UserId: { in: studentsToRemove } }
+                         })
+-                        
++
+                         const cls = await prisma.class.findUnique({
+                             where: { Id: classId },
+                             include: { Semester: true, Subject: true }
+@@ -455,7 +727,7 @@ export class ImportStudentsExcelUseCase {
+                             const orConditions: any[] = []
+                             if (cls.Semester?.Code) orConditions.push({ SemesterCode: cls.Semester.Code })
+                             if (cls.Subject?.SubjectCode) orConditions.push({ SubjectCode: cls.Subject.SubjectCode })
+-                            
++
+                             await (prisma as any).pendingEnrollment.updateMany({
+                                 where: {
+                                     UserId: { in: studentsToRemove },
+@@ -484,6 +756,7 @@ export class ImportStudentsExcelUseCase {
+ 
+             return {
+                 batchId: finalBatch.Id,
++                detectedSeason: detectedSeasonInfo.formatted,
+                 totalProcessed: rows.length,
+                 successCount,
+                 errorCount,
+@@ -491,13 +764,16 @@ export class ImportStudentsExcelUseCase {
+             }
+ 
+         } catch (err: any) {
+-            await prisma.importBatch.update({
+-                where: { Id: batch.Id },
+-                data: {
+-                    Status: 'FAILED',
+-                    ErrorDetails: err.message
+-                }
+-            })
++            // Only mark batch as failed if it was created successfully
++            if (batch?.Id) {
++                await prisma.importBatch.update({
++                    where: { Id: batch.Id },
++                    data: {
++                        Status: 'FAILED',
++                        ErrorDetails: err.message
++                    }
++                }).catch(() => { }) // Silently fail if batch update fails
++            }
+             throw err
+         }
+     }
+
+commit f14a04f6213ecb93aac74aeca586ef45fffb6a8b
+Author: Nguyß╗àn Quß╗æc ─Éß║ít <nten6205@gmail.com>
+Date:   Wed Jul 8 11:08:39 2026 +0700
+
+    feat: implement core auth, user management, and class functionality including DI container and frontend pages
+
+diff --git a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+index eda7fa8..95db147 100644
+--- a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
++++ b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+@@ -93,7 +93,7 @@ export class ImportStudentsExcelUseCase {
+                     const fullName = getField(row, 'fullName')
+                     const email = getField(row, 'email')
+                     const phone = getField(row, 'phone')
+-                    const semesterCode = getField(row, 'semester')
++                    let semesterCode = getField(row, 'semester')
+                     const classCode = getField(row, 'classCode')
+                     const outOfSemesterStr = getField(row, 'outOfSemesterSubjects') || ''
+                     const passedStr = getField(row, 'passedSubjects') || ''
+@@ -103,6 +103,26 @@ export class ImportStudentsExcelUseCase {
+                         throw new Error('Thiß║┐u th├┤ng tin bß║»t buß╗Öc (MSSV, Hß╗ì v├á t├¬n, Email, Kß╗│ hß╗ìc, Lß╗¢p hß╗ìc)')
+                     }
+ 
++                    // Resolve semesterCode to existing if fuzzy matched (e.g. "1" matches "Kß╗│ 1")
++                    const allSemesters = await prisma.semester.findMany()
++                    const semesterNumberMatch = semesterCode.match(/\d+/)
++                    const semesterNumber = semesterNumberMatch ? parseInt(semesterNumberMatch[0], 10) : null
++                    
++                    const existingSemester = allSemesters.find(s => {
++                        if (s.Code === semesterCode) return true
++                        if (s.Code?.toLowerCase() === semesterCode!.toLowerCase()) return true
++                        const sNumMatch = s.Code?.match(/\d+/)
++                        const sNum = sNumMatch ? parseInt(sNumMatch[0], 10) : null
++                        return sNum !== null && sNum === semesterNumber
++                    })
++                    
++                    if (existingSemester && existingSemester.Code) {
++                        semesterCode = existingSemester.Code
++                    } else if (semesterNumberMatch) {
++                        semesterCode = `Kß╗│ ${semesterNumberMatch[0]}`
++                    }
++
++
+                     // 1. Check duplicate MSSV or Email
+                     let user = await prisma.user.findFirst({
+                         where: {
+@@ -229,16 +249,7 @@ export class ImportStudentsExcelUseCase {
+                     const classesToEnroll: string[] = []
+                     
+                     // Main classes check
+-                    const allSemesters = await prisma.semester.findMany()
+-                    const semesterNumberMatch = semesterCode?.match(/\d+/)
+-                    const semesterNumber = semesterNumberMatch ? parseInt(semesterNumberMatch[0], 10) : null
+-                    
+-                    const semester = allSemesters.find(s => {
+-                        if (s.Code === semesterCode) return true
+-                        const sNumMatch = s.Code?.match(/\d+/)
+-                        const sNum = sNumMatch ? parseInt(sNumMatch[0], 10) : null
+-                        return sNum !== null && sNum === semesterNumber
+-                    })
++                    const semester = await prisma.semester.findFirst({ where: { Code: semesterCode } })
+ 
+                     if (semester) {
+                         const classes = await prisma.class.findMany({
+
+commit 85bad6dc3912d0026454a5f08591fe1b178319bd
+Author: Nguyß╗àn Quß╗æc ─Éß║ít <nten6205@gmail.com>
+Date:   Tue Jul 7 15:57:17 2026 +0700
+
+    feat: implement core authentication middleware and establish foundational class/course management routes and UI pages
+
+diff --git a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+index 7369d16..eda7fa8 100644
+--- a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
++++ b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+@@ -229,7 +229,17 @@ export class ImportStudentsExcelUseCase {
+                     const classesToEnroll: string[] = []
+                     
+                     // Main classes check
+-                    const semester = await prisma.semester.findFirst({ where: { Code: semesterCode } })
++                    const allSemesters = await prisma.semester.findMany()
++                    const semesterNumberMatch = semesterCode?.match(/\d+/)
++                    const semesterNumber = semesterNumberMatch ? parseInt(semesterNumberMatch[0], 10) : null
++                    
++                    const semester = allSemesters.find(s => {
++                        if (s.Code === semesterCode) return true
++                        const sNumMatch = s.Code?.match(/\d+/)
++                        const sNum = sNumMatch ? parseInt(sNumMatch[0], 10) : null
++                        return sNum !== null && sNum === semesterNumber
++                    })
++
+                     if (semester) {
+                         const classes = await prisma.class.findMany({
+                             where: { SemesterId: semester.Id, ClassCode: classCode },
+@@ -265,6 +275,30 @@ export class ImportStudentsExcelUseCase {
+                             }
+                         })
+                         if (cls) {
++                            if (cls.SubjectId && cls.SemesterId) {
++                                // Find and remove any existing class for this user in the same subject and semester
++                                const oldClasses = await prisma.studentClass.findMany({
++                                    where: {
++                                        UserId: user.Id,
++                                        Class: {
++                                            SubjectId: cls.SubjectId,
++                                            SemesterId: cls.SemesterId,
++                                            Id: { not: classId }
++                                        }
++                                    }
++                                });
++                                for (const old of oldClasses) {
++                                    await prisma.studentClass.delete({
++                                        where: { UserId_ClassId: { UserId: user.Id, ClassId: old.ClassId } }
++                                    });
++                                    // Also migrate submissions just like in update-user
++                                    await prisma.submission.updateMany({
++                                        where: { StudentId: user.Id, ClassId: old.ClassId },
++                                        data: { ClassId: classId }
++                                    });
++                                }
++                            }
++
+                             const existingEnrollment = await prisma.studentClass.findUnique({
+                                 where: { UserId_ClassId: { UserId: user.Id, ClassId: classId } }
+                             })
+
+commit bc9b70188f6f78465246630e5c5a50bf99a9ff0b
+Author: Nguyß╗àn Quß╗æc ─Éß║ít <nten6205@gmail.com>
+Date:   Mon Jul 6 17:56:20 2026 +0700
+
+    feat: implement user management system with excel import, cloudinary integration, and admin dashboard pages
+
+diff --git a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+index c87060a..7369d16 100644
+--- a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
++++ b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client'
+ import bcrypt from 'bcryptjs'
+ import * as xlsx from 'xlsx'
+ import crypto from 'crypto'
++import { CloudinaryService } from '../../../../shared/infrastructure/services/cloudinary.service.js'
+ 
+ import { IEmailService } from '../../../../shared/application/email.service.interface.js'
+ import { AppError } from '../../../../shared/application/app.error.js'
+@@ -17,10 +18,11 @@ const HEADER_ALIASES: Record<string, string[]> = {
+     fullName: ['hß╗ì v├á t├¬n', 'ho va ten', 'full name', 'fullname'],
+     email: ['email'],
+     phone: ['sß╗æ ─æiß╗çn thoß║íi', 'so dien thoai', 'phone number', 'phone'],
+-    semester: ['kß╗│ hß╗ìc', 'ky hoc', 'semester'],
++    semester: ['kß╗│ hß╗ìc', 'k├¼ hß╗ìc', 'ky hoc', 'ki hoc', 'semester'],
+     classCode: ['lß╗¢p hß╗ìc', 'lop hoc', 'class'],
+-    outOfSemesterSubjects: ['m├┤n kh├íc kß╗│ hiß╗çn tß║íi (nß╗ú/hß╗ìc v╞░ß╗út)', 'mon khac ky hien tai', 'out of semester subjects', 'nß╗ú/hß╗ìc v╞░ß╗út', 'kh├íc kß╗│'],
++    outOfSemesterSubjects: ['m├┤n kh├íc kß╗│ hiß╗çn tß║íi (nß╗ú/hß╗ìc v╞░ß╗út)', 'm├┤n kh├íc k├¼ hiß╗çn tß║íi (nß╗ú/hß╗ìc v╞░ß╗út)', 'mon khac ky hien tai', 'out of semester subjects', 'nß╗ú/hß╗ìc v╞░ß╗út', 'kh├íc kß╗│', 'kh├íc k├¼'],
+     passedSubjects: ['m├┤n ─æ├ú hß╗ìc v╞░ß╗út th├ánh c├┤ng', 'mon da hoc vuot thanh cong', 'passed subjects', 'hß╗ìc v╞░ß╗út th├ánh c├┤ng', '─æ├ú hß╗ìc'],
++    avatar: ['avatar', 'ß║únh ─æß║íi diß╗çn', 'anh dai dien', 'h├¼nh ß║únh', 'hinh anh', 'ß║únh', 'anh'],
+ }
+ 
+ function getField(row: ImportStudentRow, key: keyof typeof HEADER_ALIASES): string | undefined {
+@@ -95,6 +97,7 @@ export class ImportStudentsExcelUseCase {
+                     const classCode = getField(row, 'classCode')
+                     const outOfSemesterStr = getField(row, 'outOfSemesterSubjects') || ''
+                     const passedStr = getField(row, 'passedSubjects') || ''
++                    const avatarUrlRaw = getField(row, 'avatar') || ''
+ 
+                     if (!mssv || !fullName || !email || !semesterCode || !classCode) {
+                         throw new Error('Thiß║┐u th├┤ng tin bß║»t buß╗Öc (MSSV, Hß╗ì v├á t├¬n, Email, Kß╗│ hß╗ìc, Lß╗¢p hß╗ìc)')
+@@ -113,6 +116,16 @@ export class ImportStudentsExcelUseCase {
+                     let rawPassword = ''
+                     let passwordHash = ''
+ 
++                    // Xß╗¡ l├╜ upload avatar (nß║┐u c├│ URL hß╗úp lß╗ç)
++                    let secureAvatarUrl: string | null = null;
++                    if (avatarUrlRaw && avatarUrlRaw.startsWith('http')) {
++                        try {
++                            secureAvatarUrl = await CloudinaryService.uploadImageFromUrl(avatarUrlRaw);
++                        } catch (err) {
++                            console.warn(`Lß╗ùi upload avatar cho ${email}:`, err);
++                        }
++                    }
++
+                     if (!user) {
+                         rawPassword = crypto.randomBytes(4).toString('hex')
+                         passwordHash = await bcrypt.hash(rawPassword, 10)
+@@ -122,6 +135,7 @@ export class ImportStudentsExcelUseCase {
+                                 FullName: fullName,
+                                 Email: email,
+                                 Phone: phone,
++                                Avatar: secureAvatarUrl,
+                                 PasswordHash: passwordHash,
+                                 Status: 'Active',
+                                 RequirePasswordChange: true,
+@@ -133,6 +147,12 @@ export class ImportStudentsExcelUseCase {
+                                 }
+                             }
+                         })
++                    } else if (secureAvatarUrl) {
++                        // Nß║┐u user ─æ├ú tß╗ôn tß║íi nh╞░ng trong Excel c├│ truyß╗ün avatar URL mß╗¢i, ta update avatar cho hß╗ì
++                        user = await prisma.user.update({
++                            where: { Id: user.Id },
++                            data: { Avatar: secureAvatarUrl }
++                        });
+                     }
+ 
+                     // Store pending enrollments
+
+commit aa4900551d21a1d4f0b2f842edb1eff2de0579c7
+Author: Nguyß╗àn Quß╗æc ─Éß║ít <nten6205@gmail.com>
+Date:   Mon Jul 6 10:31:49 2026 +0700
+
+    feat: implement student gradebook and feedback appeal system
+
+diff --git a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+index f9c90d7..c87060a 100644
+--- a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
++++ b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+@@ -73,12 +73,14 @@ export class ImportStudentsExcelUseCase {
+                 data: { TotalRows: rows.length }
+             })
+ 
+-            // Roles trong DB l├á UPPERCASE (xem seed/auth) ΓÇö 'student' th╞░ß╗¥ng sß║╜ kh├┤ng bao giß╗¥ khß╗¢p
+             const studentRole = await prisma.role.findUnique({ where: { RoleName: 'STUDENT' } })
+             if (!studentRole) {
+                 throw new AppError('SYSTEM_ERROR', 'Ch╞░a cß║Ñu h├¼nh role STUDENT trong hß╗ç thß╗æng', 500)
+             }
+ 
++            // Tracking for sync
++            const processedClasses: Array<{ semesterCode?: string; classCode: string; subjectCode?: string; userId: string }> = []
++
+             // Process row by row
+             for (let i = 0; i < rows.length; i++) {
+                 const row = rows[i]
+@@ -99,7 +101,7 @@ export class ImportStudentsExcelUseCase {
+                     }
+ 
+                     // 1. Check duplicate MSSV or Email
+-                    const existingUser = await prisma.user.findFirst({
++                    let user = await prisma.user.findFirst({
+                         where: {
+                             OR: [
+                                 { Email: email },
+@@ -108,126 +110,227 @@ export class ImportStudentsExcelUseCase {
+                         }
+                     })
+ 
+-                    if (existingUser) {
+-                        throw new Error(`Email hoß║╖c MSSV ─æ├ú tß╗ôn tß║íi trong hß╗ç thß╗æng`)
+-                    }
+-
+-                    // 2. Check Semester
+-                    const semester = await prisma.semester.findFirst({
+-                        where: { Code: semesterCode }
+-                    })
+-
+-                    if (!semester) {
+-                        throw new Error(`Kh├┤ng t├¼m thß║Ñy Kß╗│ hß╗ìc "${semesterCode}" trong hß╗ç thß╗æng`)
++                    let rawPassword = ''
++                    let passwordHash = ''
++
++                    if (!user) {
++                        rawPassword = crypto.randomBytes(4).toString('hex')
++                        passwordHash = await bcrypt.hash(rawPassword, 10)
++                        user = await prisma.user.create({
++                            data: {
++                                StudentCode: mssv,
++                                FullName: fullName,
++                                Email: email,
++                                Phone: phone,
++                                PasswordHash: passwordHash,
++                                Status: 'Active',
++                                RequirePasswordChange: true,
++                                UserRole: {
++                                    create: {
++                                        RoleId: studentRole.Id,
++                                        AssignedAt: new Date()
++                                    }
++                                }
++                            }
++                        })
+                     }
+ 
+-                    // 3. Find Classes
+-                    const classes = await prisma.class.findMany({
+-                        where: {
+-                            SemesterId: semester.Id,
+-                            ClassCode: classCode
+-                        },
+-                        include: {
+-                            Subject: true
+-                        }
+-                    })
+-
+-                    if (classes.length === 0) {
+-                        throw new Error(`Kh├┤ng t├¼m thß║Ñy Lß╗¢p hß╗ìc "${classCode}" thuß╗Öc Kß╗│ hß╗ìc "${semesterCode}"`)
+-                    }
++                    // Store pending enrollments
++                    const pendingEnrollments: any[] = []
+ 
+-                    // 4. Create User
+-                    const rawPassword = crypto.randomBytes(4).toString('hex') // 8 chars
+-                    const passwordHash = await bcrypt.hash(rawPassword, 10)
+-
+-                    // Note: Since we want LastLoginAt to be null for FirstLogin=true, it will be null by default
+-                    const newUser = await prisma.user.create({
+-                        data: {
+-                            StudentCode: mssv,
+-                            FullName: fullName,
+-                            Email: email,
+-                            Phone: phone,
+-                            PasswordHash: passwordHash,
+-                            Status: 'Active',
+-                            RequirePasswordChange: true,
+-                            UserRole: {
+-                                create: {
+-                                    RoleId: studentRole.Id,
+-                                    AssignedAt: new Date()
+-                                }
+-                            },
+-                            // Add student to all matching classes (subjects)
+-                            StudentClass: {
+-                                create: classes.map(cls => ({
+-                                    ClassId: cls.Id,
+-                                    EnrolledAt: new Date()
+-                                }))
+-                            }
+-                        }
++                    // Main class
++                    pendingEnrollments.push({
++                        UserId: user.Id,
++                        SemesterCode: semesterCode,
++                        ClassCode: classCode,
++                        SubjectCode: null,
+                     })
+ 
+-                    // 5. Enroll into extra classes (out-of-semester and passed subjects)
++                    // Extra classes
+                     const extraClassesStrs = [
+                         ...outOfSemesterStr.split(',').map(s => s.trim()).filter(Boolean),
+                         ...passedStr.split(',').map(s => s.trim()).filter(Boolean)
+                     ]
+ 
+-                    const extraClassIds: string[] = []
+                     for (const extraStr of extraClassesStrs) {
+                         const parts = extraStr.split('-')
+                         if (parts.length >= 2) {
+                             const subjectCode = parts[0].trim()
+                             const clsCode = parts.slice(1).join('-').trim()
++                            pendingEnrollments.push({
++                                UserId: user.Id,
++                                SemesterCode: null,
++                                ClassCode: clsCode,
++                                SubjectCode: subjectCode,
++                            })
++                        }
++                    }
+ 
+-                            // Find the class that matches this subject code and class code
+-                            // Since we don't have exact semester for extra classes in the string, we find the most recent/active one
+-                            const cls = await prisma.class.findFirst({
+-                                where: {
+-                                    ClassCode: clsCode,
+-                                    Subject: { SubjectCode: subjectCode }
+-                                }
++                    // Tracking for sync
++                    if (semesterCode && classCode) {
++                        processedClasses.push({
++                            semesterCode: semesterCode,
++                            classCode: classCode,
++                            userId: user.Id
++                        })
++                    }
++
++                    for (const extraStr of extraClassesStrs) {
++                        const parts = extraStr.split('-')
++                        if (parts.length >= 2) {
++                            const subjectCode = parts[0].trim()
++                            const clsCode = parts.slice(1).join('-').trim()
++                            processedClasses.push({
++                                subjectCode: subjectCode,
++                                classCode: clsCode,
++                                userId: user.Id
+                             })
+-                            if (cls) {
+-                                extraClassIds.push(cls.Id)
++                        }
++                    }
++
++                    // Create pending enrollments in DB (avoid exact duplicates)
++                    for (const pe of pendingEnrollments) {
++                        const existingPe = await (prisma as any).pendingEnrollment.findFirst({
++                            where: {
++                                UserId: pe.UserId,
++                                SemesterCode: pe.SemesterCode,
++                                ClassCode: pe.ClassCode,
++                                SubjectCode: pe.SubjectCode
+                             }
++                        })
++                        if (!existingPe) {
++                            await (prisma as any).pendingEnrollment.create({
++                                data: pe
++                            })
++                        }
++                    }
++
++                    // Try to enroll immediately if classes exist
++                    const classesToEnroll: string[] = []
++                    
++                    // Main classes check
++                    const semester = await prisma.semester.findFirst({ where: { Code: semesterCode } })
++                    if (semester) {
++                        const classes = await prisma.class.findMany({
++                            where: { SemesterId: semester.Id, ClassCode: classCode },
++                            include: { Subject: true }
++                        })
++                        classesToEnroll.push(...classes.map(c => c.Id))
++                    }
++
++                    // Extra classes check
++                    for (const pe of pendingEnrollments) {
++                        if (pe.SubjectCode && pe.ClassCode) {
++                            const cls = await prisma.class.findFirst({
++                                where: { ClassCode: pe.ClassCode, Subject: { SubjectCode: pe.SubjectCode } }
++                            })
++                            if (cls) classesToEnroll.push(cls.Id)
+                         }
+                     }
+ 
+-                    if (extraClassIds.length > 0) {
+-                        // Avoid duplicate enrollments
+-                        const existingEnrollments = classes.map(c => c.Id)
+-                        const uniqueExtraClassIds = [...new Set(extraClassIds)].filter(id => !existingEnrollments.includes(id))
+-
+-                        if (uniqueExtraClassIds.length > 0) {
+-                            await prisma.studentClass.createMany({
+-                                data: uniqueExtraClassIds.map(id => ({
+-                                    UserId: newUser.Id,
+-                                    ClassId: id,
+-                                    EnrolledAt: new Date()
+-                                }))
++                    // Enroll user to classes and update pending enrollment status
++                    const uniqueClassesToEnroll = [...new Set(classesToEnroll)]
++                    const subjectsList: string[] = []
++                    const enrolledClassDetails: string[] = []
++
++                    for (const classId of uniqueClassesToEnroll) {
++                        const cls = await prisma.class.findUnique({
++                            where: { Id: classId },
++                            include: { 
++                                Subject: true, 
++                                Semester: true,
++                                InstructorClass: {
++                                    include: { User: true }
++                                }
++                            }
++                        })
++                        if (cls) {
++                            const existingEnrollment = await prisma.studentClass.findUnique({
++                                where: { UserId_ClassId: { UserId: user.Id, ClassId: classId } }
++                            })
++                            if (!existingEnrollment) {
++                                await prisma.studentClass.create({
++                                    data: { UserId: user.Id, ClassId: classId, EnrolledAt: new Date() }
++                                })
++                            }
++                            if (cls.Subject) {
++                                subjectsList.push(cls.Subject.SubjectCode as string)
++                            }
++
++                            // Extract instructors
++                            let instructorStr = '─Éang cß║¡p nhß║¡t'
++                            if (cls.InstructorClass && cls.InstructorClass.length > 0) {
++                                instructorStr = cls.InstructorClass.map(ic => `${ic.User.FullName} (${ic.User.Email})`).join(', ')
++                            }
++
++                            const subjectStr = cls.Subject ? `${cls.Subject.SubjectCode}` : 'Ch╞░a r├╡ m├┤n'
++                            enrolledClassDetails.push(`<li><strong>M├┤n ${subjectStr} (Lß╗¢p: ${cls.ClassCode || classCode}):</strong> Giß║úng vi├¬n: ${instructorStr}</li>`)
++
++                            // Mark related pending enrollments as Enrolled
++                            const peQuery: any = {
++                                UserId: user.Id,
++                                ClassCode: cls.ClassCode,
++                            }
++                            if (cls.Semester?.Code) {
++                                peQuery.SemesterCode = cls.Semester.Code
++                            }
++                            await (prisma as any).pendingEnrollment.updateMany({
++                                where: peQuery,
++                                data: { Status: 'Enrolled' }
++                            })
++                            
++                            const peQuery2: any = {
++                                UserId: user.Id,
++                                ClassCode: cls.ClassCode,
++                            }
++                            if (cls.Subject?.SubjectCode) {
++                                peQuery2.SubjectCode = cls.Subject.SubjectCode
++                            }
++                            await (prisma as any).pendingEnrollment.updateMany({
++                                where: peQuery2,
++                                data: { Status: 'Enrolled' }
+                             })
+                         }
+                     }
+ 
+-                    // 6. Send Email
+-                    const subjectsList = classes.map(c => c.Subject?.SubjectCode).filter(Boolean).join(', ')
++                    // 6. Send Email Notifications
++                    
++                    // 6.1. Send Account Creation Email if new user
++                    if (rawPassword) {
++                        await this.emailService.sendEmail(
++                            email,
++                            'Th├┤ng tin t├ái khoß║ún hß╗ç thß╗æng AITA',
++                            `
++                                <p>Ch├áo <strong>${fullName}</strong>,</p>
++                                <p>T├ái khoß║ún cß╗ºa bß║ín ─æ├ú ─æ╞░ß╗úc tß║ío th├ánh c├┤ng tr├¬n hß╗ç thß╗æng AITA.</p>
++                                <ul>
++                                    <li><strong>MSSV:</strong> ${mssv}</li>
++                                    <li><strong>Email ─æ─âng nhß║¡p:</strong> ${email}</li>
++                                    <li><strong>Mß║¡t khß║⌐u tß║ím:</strong> ${rawPassword}</li>
++                                </ul>
++                                <p><strong>L╞░u ├╜:</strong> ─æ├óy l├á mß║¡t khß║⌐u tß║ím. Khi ─æ─âng nhß║¡p lß║ºn ─æß║ºu tr├¬n website, hß╗ç thß╗æng sß║╜ y├¬u cß║ºu bß║ín ─æß╗òi mß║¡t khß║⌐u mß╗¢i ─æß╗â bß║úo mß║¡t t├ái khoß║ún.</p>
++                            `
++                        )
++                    }
+ 
++                    // 6.2. Send Class Enrollment Email
++                    const classEnrollmentContent = `
++                        <p>Ch├áo <strong>${fullName}</strong>,</p>
++                        <p>Bß║ín vß╗½a ─æ╞░ß╗úc ph├ón bß╗ò v├áo danh s├ích lß╗¢p hß╗ìc tr├¬n hß╗ç thß╗æng AITA.</p>
++                        <ul>
++                            <li><strong>Kß╗│ hß╗ìc:</strong> ${semesterCode}</li>
++                            <li><strong>Lß╗¢p ─æß╗ïnh danh:</strong> ${classCode}</li>
++                        </ul>
++                        <p><strong>Chi tiß║┐t c├íc m├┤n ─æ├ú xß║┐p lß╗¢p:</strong></p>
++                        <ul>
++                            ${enrolledClassDetails.length > 0 ? enrolledClassDetails.join('\n') : '<li>─Éang chß╗¥ giß║úng vi├¬n tß║ío lß╗¢p, vui l├▓ng theo d├╡i th├¬m.</li>'}
++                        </ul>
++                        <p>Vui l├▓ng ─æ─âng nhß║¡p v├áo hß╗ç thß╗æng (Email: <strong>${email}</strong>) ─æß╗â theo d├╡i v├á nß╗Öp b├ái tß║¡p.</p>
++                    `
+                     await this.emailService.sendEmail(
+                         email,
+-                        'Th├┤ng tin t├ái khoß║ún sinh vi├¬n AITA',
+-                        `
+-                            <p>Ch├áo <strong>${fullName}</strong>,</p>
+-                            <p>T├ái khoß║ún cß╗ºa bß║ín tr├¬n hß╗ç thß╗æng AITA ─æ├ú ─æ╞░ß╗úc tß║ío th├ánh c├┤ng.</p>
+-                            <ul>
+-                                <li><strong>MSSV:</strong> ${mssv}</li>
+-                                <li><strong>Email ─æ─âng nhß║¡p:</strong> ${email}</li>
+-                                <li><strong>Mß║¡t khß║⌐u tß║ím:</strong> ${rawPassword}</li>
+-                                <li><strong>Kß╗│ hß╗ìc hiß╗çn tß║íi:</strong> Semester ${semesterCode}</li>
+-                                <li><strong>Lß╗¢p hß╗ìc:</strong> ${classCode}</li>
+-                                <li><strong>C├íc m├┤n tham gia:</strong> ${subjectsList || 'Kh├┤ng c├│'}</li>
+-                            </ul>
+-                            <p><strong>L╞░u ├╜:</strong> ─æ├óy l├á mß║¡t khß║⌐u tß║ím. Khi ─æ─âng nhß║¡p lß║ºn ─æß║ºu tr├¬n website, hß╗ç thß╗æng sß║╜ y├¬u cß║ºu bß║ín ─æß╗òi mß║¡t khß║⌐u mß╗¢i tr╞░ß╗¢c khi v├áo lß╗¢p hß╗ìc v├á nß╗Öp b├ái.</p>
+-                        `
++                        'Th├┤ng b├ío lß╗¢p hß╗ìc hß╗ç thß╗æng AITA',
++                        classEnrollmentContent
+                     )
+ 
+                     successCount++
+@@ -237,6 +340,72 @@ export class ImportStudentsExcelUseCase {
+                 }
+             }
+ 
++            // --- SYNC DELETION LOGIC ---
++            try {
++                const classRosters = new Map<string, Set<string>>()
++                
++                for (const pc of processedClasses) {
++                    let clsId: string | null = null
++                    if (pc.semesterCode && pc.classCode) {
++                        const semester = await prisma.semester.findFirst({ where: { Code: pc.semesterCode } })
++                        if (semester) {
++                            const cls = await prisma.class.findFirst({ where: { SemesterId: semester.Id, ClassCode: pc.classCode } })
++                            if (cls) clsId = cls.Id
++                        }
++                    } else if (pc.subjectCode && pc.classCode) {
++                        const cls = await prisma.class.findFirst({
++                            where: { ClassCode: pc.classCode, Subject: { SubjectCode: pc.subjectCode } }
++                        })
++                        if (cls) clsId = cls.Id
++                    }
++
++                    if (clsId) {
++                        if (!classRosters.has(clsId)) {
++                            classRosters.set(clsId, new Set())
++                        }
++                        classRosters.get(clsId)!.add(pc.userId)
++                    }
++                }
++
++                for (const [classId, validUserIds] of classRosters.entries()) {
++                    const currentStudents = await prisma.studentClass.findMany({
++                        where: { ClassId: classId },
++                        select: { UserId: true }
++                    })
++
++                    const studentsToRemove = currentStudents
++                        .filter(cs => !validUserIds.has(cs.UserId))
++                        .map(cs => cs.UserId)
++
++                    if (studentsToRemove.length > 0) {
++                        await prisma.studentClass.deleteMany({
++                            where: { ClassId: classId, UserId: { in: studentsToRemove } }
++                        })
++                        
++                        const cls = await prisma.class.findUnique({
++                            where: { Id: classId },
++                            include: { Semester: true, Subject: true }
++                        })
++                        if (cls) {
++                            const orConditions: any[] = []
++                            if (cls.Semester?.Code) orConditions.push({ SemesterCode: cls.Semester.Code })
++                            if (cls.Subject?.SubjectCode) orConditions.push({ SubjectCode: cls.Subject.SubjectCode })
++                            
++                            await (prisma as any).pendingEnrollment.updateMany({
++                                where: {
++                                    UserId: { in: studentsToRemove },
++                                    ClassCode: cls.ClassCode,
++                                    OR: orConditions.length > 0 ? orConditions : undefined
++                                },
++                                data: { Status: 'Cancelled' }
++                            })
++                        }
++                    }
++                }
++            } catch (syncErr) {
++                console.error('Failed to sync deletions:', syncErr)
++            }
++
+             // Update batch final status
+             const finalBatch = await prisma.importBatch.update({
+                 where: { Id: batch.Id },
+
+commit 8e25d6f05682675226529ae67ba3cb75ef77ba11
+Author: Nguyß╗àn Quß╗æc ─Éß║ít <nten6205@gmail.com>
+Date:   Sun Jul 5 17:38:00 2026 +0700
+
+    feat: implement full-stack CRUD for subjects and initialize admin management pages for users, classes, and reports
+
+diff --git a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+index a5a0591..f9c90d7 100644
+--- a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
++++ b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client'
+ import bcrypt from 'bcryptjs'
+ import * as xlsx from 'xlsx'
+ import crypto from 'crypto'
++
+ import { IEmailService } from '../../../../shared/application/email.service.interface.js'
+ import { AppError } from '../../../../shared/application/app.error.js'
+ 
+
+commit 3cb3711e24f3e2a652b2e3e214140b8742336c23
+Author: Nguyß╗àn Quß╗æc ─Éß║ít <nten6205@gmail.com>
+Date:   Sun Jul 5 11:47:50 2026 +0700
+
+    feat: implement core modules for semesters, auth, and users including controllers, use cases, and database integration
+
+diff --git a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+index c27713b..a5a0591 100644
+--- a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
++++ b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+@@ -18,6 +18,8 @@ const HEADER_ALIASES: Record<string, string[]> = {
+     phone: ['sß╗æ ─æiß╗çn thoß║íi', 'so dien thoai', 'phone number', 'phone'],
+     semester: ['kß╗│ hß╗ìc', 'ky hoc', 'semester'],
+     classCode: ['lß╗¢p hß╗ìc', 'lop hoc', 'class'],
++    outOfSemesterSubjects: ['m├┤n kh├íc kß╗│ hiß╗çn tß║íi (nß╗ú/hß╗ìc v╞░ß╗út)', 'mon khac ky hien tai', 'out of semester subjects', 'nß╗ú/hß╗ìc v╞░ß╗út', 'kh├íc kß╗│'],
++    passedSubjects: ['m├┤n ─æ├ú hß╗ìc v╞░ß╗út th├ánh c├┤ng', 'mon da hoc vuot thanh cong', 'passed subjects', 'hß╗ìc v╞░ß╗út th├ánh c├┤ng', '─æ├ú hß╗ìc'],
+ }
+ 
+ function getField(row: ImportStudentRow, key: keyof typeof HEADER_ALIASES): string | undefined {
+@@ -32,11 +34,11 @@ function getField(row: ImportStudentRow, key: keyof typeof HEADER_ALIASES): stri
+ }
+ 
+ export class ImportStudentsExcelUseCase {
+-    constructor(private readonly emailService: IEmailService) {}
++    constructor(private readonly emailService: IEmailService) { }
+ 
+     async execute(input: { fileBuffer: Buffer; fileName: string; fileUrl: string; importedByUserId: string }) {
+         const { fileBuffer, fileName, fileUrl, importedByUserId } = input
+-        
++
+         let successCount = 0
+         let errorCount = 0
+         const errors: string[] = []
+@@ -64,7 +66,7 @@ export class ImportStudentsExcelUseCase {
+ 
+             const sheet = workbook.Sheets[sheetName]
+             const rows: ImportStudentRow[] = xlsx.utils.sheet_to_json(sheet)
+-            
++
+             await prisma.importBatch.update({
+                 where: { Id: batch.Id },
+                 data: { TotalRows: rows.length }
+@@ -88,6 +90,8 @@ export class ImportStudentsExcelUseCase {
+                     const phone = getField(row, 'phone')
+                     const semesterCode = getField(row, 'semester')
+                     const classCode = getField(row, 'classCode')
++                    const outOfSemesterStr = getField(row, 'outOfSemesterSubjects') || ''
++                    const passedStr = getField(row, 'passedSubjects') || ''
+ 
+                     if (!mssv || !fullName || !email || !semesterCode || !classCode) {
+                         throw new Error('Thiß║┐u th├┤ng tin bß║»t buß╗Öc (MSSV, Hß╗ì v├á t├¬n, Email, Kß╗│ hß╗ìc, Lß╗¢p hß╗ìc)')
+@@ -136,7 +140,7 @@ export class ImportStudentsExcelUseCase {
+                     const passwordHash = await bcrypt.hash(rawPassword, 10)
+ 
+                     // Note: Since we want LastLoginAt to be null for FirstLogin=true, it will be null by default
+-                    await prisma.user.create({
++                    const newUser = await prisma.user.create({
+                         data: {
+                             StudentCode: mssv,
+                             FullName: fullName,
+@@ -161,9 +165,52 @@ export class ImportStudentsExcelUseCase {
+                         }
+                     })
+ 
+-                    // 5. Send Email
++                    // 5. Enroll into extra classes (out-of-semester and passed subjects)
++                    const extraClassesStrs = [
++                        ...outOfSemesterStr.split(',').map(s => s.trim()).filter(Boolean),
++                        ...passedStr.split(',').map(s => s.trim()).filter(Boolean)
++                    ]
++
++                    const extraClassIds: string[] = []
++                    for (const extraStr of extraClassesStrs) {
++                        const parts = extraStr.split('-')
++                        if (parts.length >= 2) {
++                            const subjectCode = parts[0].trim()
++                            const clsCode = parts.slice(1).join('-').trim()
++
++                            // Find the class that matches this subject code and class code
++                            // Since we don't have exact semester for extra classes in the string, we find the most recent/active one
++                            const cls = await prisma.class.findFirst({
++                                where: {
++                                    ClassCode: clsCode,
++                                    Subject: { SubjectCode: subjectCode }
++                                }
++                            })
++                            if (cls) {
++                                extraClassIds.push(cls.Id)
++                            }
++                        }
++                    }
++
++                    if (extraClassIds.length > 0) {
++                        // Avoid duplicate enrollments
++                        const existingEnrollments = classes.map(c => c.Id)
++                        const uniqueExtraClassIds = [...new Set(extraClassIds)].filter(id => !existingEnrollments.includes(id))
++
++                        if (uniqueExtraClassIds.length > 0) {
++                            await prisma.studentClass.createMany({
++                                data: uniqueExtraClassIds.map(id => ({
++                                    UserId: newUser.Id,
++                                    ClassId: id,
++                                    EnrolledAt: new Date()
++                                }))
++                            })
++                        }
++                    }
++
++                    // 6. Send Email
+                     const subjectsList = classes.map(c => c.Subject?.SubjectCode).filter(Boolean).join(', ')
+-                    
++
+                     await this.emailService.sendEmail(
+                         email,
+                         'Th├┤ng tin t├ái khoß║ún sinh vi├¬n AITA',
+
+commit 5a66d76da0c6e4da3dfe110a8107380de4045357
+Author: TinNK3 <khanhtin.work@gmail.com>
+Date:   Sat Jul 4 22:04:36 2026 +0700
+
+    [WEB-A-01] fix student import + forced temp-password change + teaching info on profile
+    
+    Root cause of 'import shows nothing': role lookup used 'student' while
+    roles are stored UPPERCASE ('STUDENT') ΓåÆ every batch failed at setup.
+    
+    - import: tolerant headers (VN + EN: MSSV/Student ID, Ho va ten/Full Name,
+      Ky hoc/Semester, Lop hoc/Class...), fix ImportedBy (req.user.id, not
+      .userId), set RequirePasswordChange=true on created students, clearer
+      temp-password email wording
+    - schema: User.RequirePasswordChange Boolean? default(false) ΓÇö run
+      npx prisma db push before deploying
+    - auth: login/me responses expose requirePasswordChange; change-password
+      clears the flag (new IUserRepository.setRequirePasswordChange)
+    - FE: login redirects flagged users to profile with a change-password
+      banner; lecturer profile shows teaching assignments (class + subject +
+      semester, from role-scoped GET /classes)
+    
+    Verified: prisma generate + be build + FE build pass.
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+diff --git a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+index 9993b4a..c27713b 100644
+--- a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
++++ b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+@@ -7,13 +7,28 @@ import { AppError } from '../../../../shared/application/app.error.js'
+ 
+ const prisma = new PrismaClient()
+ 
+-interface ImportStudentRow {
+-    MSSV?: string;
+-    'Hß╗ì v├á t├¬n'?: string;
+-    Email?: string;
+-    'Sß╗æ ─æiß╗çn thoß║íi'?: string;
+-    'Kß╗│ hß╗ìc'?: string;
+-    'Lß╗¢p hß╗ìc'?: string;
++type ImportStudentRow = Record<string, unknown>
++
++// Chß║Ñp nhß║¡n cß║ú header tiß║┐ng Viß╗çt lß║½n tiß║┐ng Anh (file cß╗ºa Admin c├│ thß╗â xuß║Ñt tß╗½ template kh├íc nhau).
++// So khß╗¢p kh├┤ng ph├ón biß╗çt hoa th╞░ß╗¥ng v├á bß╗Å khoß║úng trß║»ng thß╗½a.
++const HEADER_ALIASES: Record<string, string[]> = {
++    mssv: ['mssv', 'student id', 'studentid', 'student code'],
++    fullName: ['hß╗ì v├á t├¬n', 'ho va ten', 'full name', 'fullname'],
++    email: ['email'],
++    phone: ['sß╗æ ─æiß╗çn thoß║íi', 'so dien thoai', 'phone number', 'phone'],
++    semester: ['kß╗│ hß╗ìc', 'ky hoc', 'semester'],
++    classCode: ['lß╗¢p hß╗ìc', 'lop hoc', 'class'],
++}
++
++function getField(row: ImportStudentRow, key: keyof typeof HEADER_ALIASES): string | undefined {
++    const aliases = HEADER_ALIASES[key]
++    for (const [header, value] of Object.entries(row)) {
++        if (aliases.includes(header.trim().toLowerCase())) {
++            const s = value?.toString().trim()
++            if (s) return s
++        }
++    }
++    return undefined
+ }
+ 
+ export class ImportStudentsExcelUseCase {
+@@ -55,9 +70,10 @@ export class ImportStudentsExcelUseCase {
+                 data: { TotalRows: rows.length }
+             })
+ 
+-            const studentRole = await prisma.role.findUnique({ where: { RoleName: 'student' } })
++            // Roles trong DB l├á UPPERCASE (xem seed/auth) ΓÇö 'student' th╞░ß╗¥ng sß║╜ kh├┤ng bao giß╗¥ khß╗¢p
++            const studentRole = await prisma.role.findUnique({ where: { RoleName: 'STUDENT' } })
+             if (!studentRole) {
+-                throw new AppError('SYSTEM_ERROR', 'Ch╞░a cß║Ñu h├¼nh role student trong hß╗ç thß╗æng', 500)
++                throw new AppError('SYSTEM_ERROR', 'Ch╞░a cß║Ñu h├¼nh role STUDENT trong hß╗ç thß╗æng', 500)
+             }
+ 
+             // Process row by row
+@@ -66,12 +82,12 @@ export class ImportStudentsExcelUseCase {
+                 const rowIndex = i + 2 // +2 because 0-index and header row
+ 
+                 try {
+-                    const mssv = row['MSSV']?.toString().trim()
+-                    const fullName = row['Hß╗ì v├á t├¬n']?.toString().trim()
+-                    const email = row['Email']?.toString().trim()
+-                    const phone = row['Sß╗æ ─æiß╗çn thoß║íi']?.toString().trim()
+-                    const semesterCode = row['Kß╗│ hß╗ìc']?.toString().trim()
+-                    const classCode = row['Lß╗¢p hß╗ìc']?.toString().trim()
++                    const mssv = getField(row, 'mssv')
++                    const fullName = getField(row, 'fullName')
++                    const email = getField(row, 'email')
++                    const phone = getField(row, 'phone')
++                    const semesterCode = getField(row, 'semester')
++                    const classCode = getField(row, 'classCode')
+ 
+                     if (!mssv || !fullName || !email || !semesterCode || !classCode) {
+                         throw new Error('Thiß║┐u th├┤ng tin bß║»t buß╗Öc (MSSV, Hß╗ì v├á t├¬n, Email, Kß╗│ hß╗ìc, Lß╗¢p hß╗ìc)')
+@@ -128,6 +144,7 @@ export class ImportStudentsExcelUseCase {
+                             Phone: phone,
+                             PasswordHash: passwordHash,
+                             Status: 'Active',
++                            RequirePasswordChange: true,
+                             UserRole: {
+                                 create: {
+                                     RoleId: studentRole.Id,
+@@ -161,14 +178,14 @@ export class ImportStudentsExcelUseCase {
+                                 <li><strong>Lß╗¢p hß╗ìc:</strong> ${classCode}</li>
+                                 <li><strong>C├íc m├┤n tham gia:</strong> ${subjectsList || 'Kh├┤ng c├│'}</li>
+                             </ul>
+-                            <p>Vui l├▓ng ─æ─âng nhß║¡p v├á thay ─æß╗òi mß║¡t khß║⌐u trong lß║ºn ─æ─âng nhß║¡p ─æß║ºu ti├¬n ─æß╗â ─æß║úm bß║úo an to├án th├┤ng tin.</p>
++                            <p><strong>L╞░u ├╜:</strong> ─æ├óy l├á mß║¡t khß║⌐u tß║ím. Khi ─æ─âng nhß║¡p lß║ºn ─æß║ºu tr├¬n website, hß╗ç thß╗æng sß║╜ y├¬u cß║ºu bß║ín ─æß╗òi mß║¡t khß║⌐u mß╗¢i tr╞░ß╗¢c khi v├áo lß╗¢p hß╗ìc v├á nß╗Öp b├ái.</p>
+                         `
+                     )
+ 
+                     successCount++
+                 } catch (err: any) {
+                     errorCount++
+-                    errors.push(`D├▓ng ${rowIndex} (${row.Email || 'Kh├┤ng r├╡'}): ${err.message}`)
++                    errors.push(`D├▓ng ${rowIndex} (${getField(row, 'email') || 'Kh├┤ng r├╡'}): ${err.message}`)
+                 }
+             }
+ 
+
+commit a0d52383363792f1dc96d677cffd572c6abafb9a
+Author: Nguyß╗àn Quß╗æc ─Éß║ít <nten6205@gmail.com>
+Date:   Sat Jul 4 17:12:12 2026 +0700
+
+    feat: implement student Excel import functionality using multer and dedicated use case
+
+diff --git a/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+new file mode 100644
+index 0000000..9993b4a
+--- /dev/null
++++ b/be/src/modules/users/application/use-cases/import-students-excel.use-case.ts
+@@ -0,0 +1,205 @@
++import { PrismaClient } from '@prisma/client'
++import bcrypt from 'bcryptjs'
++import * as xlsx from 'xlsx'
++import crypto from 'crypto'
++import { IEmailService } from '../../../../shared/application/email.service.interface.js'
++import { AppError } from '../../../../shared/application/app.error.js'
++
++const prisma = new PrismaClient()
++
++interface ImportStudentRow {
++    MSSV?: string;
++    'Hß╗ì v├á t├¬n'?: string;
++    Email?: string;
++    'Sß╗æ ─æiß╗çn thoß║íi'?: string;
++    'Kß╗│ hß╗ìc'?: string;
++    'Lß╗¢p hß╗ìc'?: string;
++}
++
++export class ImportStudentsExcelUseCase {
++    constructor(private readonly emailService: IEmailService) {}
++
++    async execute(input: { fileBuffer: Buffer; fileName: string; fileUrl: string; importedByUserId: string }) {
++        const { fileBuffer, fileName, fileUrl, importedByUserId } = input
++        
++        let successCount = 0
++        let errorCount = 0
++        const errors: string[] = []
++
++        // 1. Create ImportBatch record first
++        const batch = await prisma.importBatch.create({
++            data: {
++                FileName: fileName,
++                FileUrl: fileUrl,
++                Status: 'PROCESSING',
++                TotalRows: 0,
++                SuccessCount: 0,
++                ErrorCount: 0,
++                ImportedBy: importedByUserId
++            }
++        })
++
++        try {
++            // 2. Parse Excel file
++            const workbook = xlsx.read(fileBuffer, { type: 'buffer' })
++            const sheetName = workbook.SheetNames[0]
++            if (!sheetName) {
++                throw new AppError('INVALID_FILE', 'File Excel kh├┤ng c├│ dß╗» liß╗çu', 400)
++            }
++
++            const sheet = workbook.Sheets[sheetName]
++            const rows: ImportStudentRow[] = xlsx.utils.sheet_to_json(sheet)
++            
++            await prisma.importBatch.update({
++                where: { Id: batch.Id },
++                data: { TotalRows: rows.length }
++            })
++
++            const studentRole = await prisma.role.findUnique({ where: { RoleName: 'student' } })
++            if (!studentRole) {
++                throw new AppError('SYSTEM_ERROR', 'Ch╞░a cß║Ñu h├¼nh role student trong hß╗ç thß╗æng', 500)
++            }
++
++            // Process row by row
++            for (let i = 0; i < rows.length; i++) {
++                const row = rows[i]
++                const rowIndex = i + 2 // +2 because 0-index and header row
++
++                try {
++                    const mssv = row['MSSV']?.toString().trim()
++                    const fullName = row['Hß╗ì v├á t├¬n']?.toString().trim()
++                    const email = row['Email']?.toString().trim()
++                    const phone = row['Sß╗æ ─æiß╗çn thoß║íi']?.toString().trim()
++                    const semesterCode = row['Kß╗│ hß╗ìc']?.toString().trim()
++                    const classCode = row['Lß╗¢p hß╗ìc']?.toString().trim()
++
++                    if (!mssv || !fullName || !email || !semesterCode || !classCode) {
++                        throw new Error('Thiß║┐u th├┤ng tin bß║»t buß╗Öc (MSSV, Hß╗ì v├á t├¬n, Email, Kß╗│ hß╗ìc, Lß╗¢p hß╗ìc)')
++                    }
++
++                    // 1. Check duplicate MSSV or Email
++                    const existingUser = await prisma.user.findFirst({
++                        where: {
++                            OR: [
++                                { Email: email },
++                                { StudentCode: mssv }
++                            ]
++                        }
++                    })
++
++                    if (existingUser) {
++                        throw new Error(`Email hoß║╖c MSSV ─æ├ú tß╗ôn tß║íi trong hß╗ç thß╗æng`)
++                    }
++
++                    // 2. Check Semester
++                    const semester = await prisma.semester.findFirst({
++                        where: { Code: semesterCode }
++                    })
++
++                    if (!semester) {
++                        throw new Error(`Kh├┤ng t├¼m thß║Ñy Kß╗│ hß╗ìc "${semesterCode}" trong hß╗ç thß╗æng`)
++                    }
++
++                    // 3. Find Classes
++                    const classes = await prisma.class.findMany({
++                        where: {
++                            SemesterId: semester.Id,
++                            ClassCode: classCode
++                        },
++                        include: {
++                            Subject: true
++                        }
++                    })
++
++                    if (classes.length === 0) {
++                        throw new Error(`Kh├┤ng t├¼m thß║Ñy Lß╗¢p hß╗ìc "${classCode}" thuß╗Öc Kß╗│ hß╗ìc "${semesterCode}"`)
++                    }
++
++                    // 4. Create User
++                    const rawPassword = crypto.randomBytes(4).toString('hex') // 8 chars
++                    const passwordHash = await bcrypt.hash(rawPassword, 10)
++
++                    // Note: Since we want LastLoginAt to be null for FirstLogin=true, it will be null by default
++                    await prisma.user.create({
++                        data: {
++                            StudentCode: mssv,
++                            FullName: fullName,
++                            Email: email,
++                            Phone: phone,
++                            PasswordHash: passwordHash,
++                            Status: 'Active',
++                            UserRole: {
++                                create: {
++                                    RoleId: studentRole.Id,
++                                    AssignedAt: new Date()
++                                }
++                            },
++                            // Add student to all matching classes (subjects)
++                            StudentClass: {
++                                create: classes.map(cls => ({
++                                    ClassId: cls.Id,
++                                    EnrolledAt: new Date()
++                                }))
++                            }
++                        }
++                    })
++
++                    // 5. Send Email
++                    const subjectsList = classes.map(c => c.Subject?.SubjectCode).filter(Boolean).join(', ')
++                    
++                    await this.emailService.sendEmail(
++                        email,
++                        'Th├┤ng tin t├ái khoß║ún sinh vi├¬n AITA',
++                        `
++                            <p>Ch├áo <strong>${fullName}</strong>,</p>
++                            <p>T├ái khoß║ún cß╗ºa bß║ín tr├¬n hß╗ç thß╗æng AITA ─æ├ú ─æ╞░ß╗úc tß║ío th├ánh c├┤ng.</p>
++                            <ul>
++                                <li><strong>MSSV:</strong> ${mssv}</li>
++                                <li><strong>Email ─æ─âng nhß║¡p:</strong> ${email}</li>
++                                <li><strong>Mß║¡t khß║⌐u tß║ím:</strong> ${rawPassword}</li>
++                                <li><strong>Kß╗│ hß╗ìc hiß╗çn tß║íi:</strong> Semester ${semesterCode}</li>
++                                <li><strong>Lß╗¢p hß╗ìc:</strong> ${classCode}</li>
++                                <li><strong>C├íc m├┤n tham gia:</strong> ${subjectsList || 'Kh├┤ng c├│'}</li>
++                            </ul>
++                            <p>Vui l├▓ng ─æ─âng nhß║¡p v├á thay ─æß╗òi mß║¡t khß║⌐u trong lß║ºn ─æ─âng nhß║¡p ─æß║ºu ti├¬n ─æß╗â ─æß║úm bß║úo an to├án th├┤ng tin.</p>
++                        `
++                    )
++
++                    successCount++
++                } catch (err: any) {
++                    errorCount++
++                    errors.push(`D├▓ng ${rowIndex} (${row.Email || 'Kh├┤ng r├╡'}): ${err.message}`)
++                }
++            }
++
++            // Update batch final status
++            const finalBatch = await prisma.importBatch.update({
++                where: { Id: batch.Id },
++                data: {
++                    Status: 'COMPLETED',
++                    SuccessCount: successCount,
++                    ErrorCount: errorCount,
++                    ErrorDetails: JSON.stringify(errors)
++                }
++            })
++
++            return {
++                batchId: finalBatch.Id,
++                totalProcessed: rows.length,
++                successCount,
++                errorCount,
++                errors
++            }
++
++        } catch (err: any) {
++            await prisma.importBatch.update({
++                where: { Id: batch.Id },
++                data: {
++                    Status: 'FAILED',
++                    ErrorDetails: err.message
++                }
++            })
++            throw err
++        }
++    }
++}

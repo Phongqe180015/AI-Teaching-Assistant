@@ -1,0 +1,248 @@
+@import 'tailwindcss';
+@plugin '@tailwindcss/typography';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+
+  /* ── Brand = FPT Orange ── */
+  --color-brand-50:  #fff7ed;
+  --color-brand-100: #ffedd5;
+  --color-brand-200: #fed7aa;
+  --color-brand-300: #fdba74;
+  --color-brand-400: #fb923c;
+  --color-brand-500: #f97316;
+  --color-brand-600: #ea580c;
+  --color-brand-700: #c2410c;
+  --color-brand-800: #9a3412;
+  --color-brand-900: #7c2d12;
+  --color-brand-950: #431407;
+
+  /* ── Theme Backgrounds ── */
+  --color-bg-light: #f8fafc; /* slate-50 */
+  --color-bg-light-orange: #fffbf7; /* warm light tint matching login theme */
+
+  /* ── Accent = Emerald for Success ── */
+  --color-accent-400: #34d399;
+  --color-accent-500: #10b981;
+  --color-accent-600: #059669;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  body {
+    /* Light: clean slate — Dark: deep navy-black */
+    @apply bg-slate-50 text-slate-800 antialiased font-sans;
+    @apply dark:bg-[#0f1117] dark:text-slate-200;
+    transition: background-color 0.25s ease, color 0.25s ease;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+  }
+
+  #root {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  .rsw-editor, .rsw-ce {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-slate-300 dark:bg-slate-700 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-400 dark:bg-slate-600;
+  }
+
+  /* Remove default backticks from Tailwind Typography code blocks */
+  .prose code::before,
+  .prose code::after {
+    content: none !important;
+  }
+  
+  /* Make inline code look like nice Github-style badges */
+  .prose code {
+    @apply bg-slate-100 dark:bg-slate-800 text-blue-600 dark:text-blue-400 px-1.5 py-0.5 rounded-md font-mono text-[0.9em] font-medium;
+  }
+
+  /* Force full width on prose containers across all assignments ("không bị hẹp") */
+  .prose {
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+  .prose > * {
+    max-width: 100% !important;
+  }
+  .prose table {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  /* Code blocks inside rich text content (.prose, .rsw-ce, .assignment-content): Original Dark background with bright crisp light text */
+  .prose pre,
+  .assignment-content pre,
+  .rsw-ce pre {
+    background-color: #1e293b !important;
+    border: 1px solid #334155 !important;
+    color: #f8fafc !important;
+    border-radius: 0.75rem !important;
+    padding: 1rem !important;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
+  }
+  .prose pre *,
+  .assignment-content pre *,
+  .rsw-ce pre * {
+    color: #f8fafc !important;
+    background-color: transparent !important;
+  }
+  .prose pre code,
+  .assignment-content pre code,
+  .rsw-ce pre code {
+    color: #f8fafc !important;
+    background-color: transparent !important;
+    padding: 0 !important;
+    border: none !important;
+  }
+
+  /* Global hand pointer cursor on all clickable elements across Admin, Lecturer & Student roles */
+  button:not(:disabled),
+  a:not([aria-disabled="true"]),
+  select:not(:disabled),
+  summary,
+  [role="button"]:not([aria-disabled="true"]),
+  [role="tab"]:not([aria-disabled="true"]),
+  [role="option"],
+  [role="menuitem"],
+  [role="checkbox"],
+  [role="radio"],
+  [role="link"],
+  input[type="submit"]:not(:disabled),
+  input[type="button"]:not(:disabled),
+  input[type="reset"]:not(:disabled),
+  input[type="checkbox"]:not(:disabled),
+  input[type="radio"]:not(:disabled),
+  input[type="file"]::-webkit-file-upload-button,
+  .cursor-pointer,
+  [onClick] {
+    cursor: pointer !important;
+  }
+
+  button:disabled,
+  [disabled],
+  [aria-disabled="true"] {
+    cursor: not-allowed !important;
+  }
+}
+
+@layer utilities {
+
+  /* ── Gradients ── */
+  .gradient-brand {
+    background: linear-gradient(135deg, #c2410c 0%, #ea580c 50%, #f97316 100%);
+  }
+  .gradient-accent {
+    background: linear-gradient(135deg, #c2410c 0%, #f97316 100%);
+  }
+  .gradient-sidebar-admin {
+    background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+  }
+  .gradient-sidebar-lecturer {
+    background: linear-gradient(180deg, #431407 0%, #7c2d12 100%);
+  }
+  .gradient-sidebar-student {
+    background: linear-gradient(180deg, #064e3b 0%, #065f46 100%);
+  }
+
+  /* ── Glass ── */
+  .glass {
+    @apply bg-white/80 backdrop-blur-xl border border-white/60;
+    @apply dark:bg-slate-900/80 dark:border-slate-700/50;
+  }
+
+  /* ── Skeleton ── */
+  .skeleton {
+    @apply bg-slate-200 dark:bg-slate-800 rounded animate-pulse;
+  }
+
+  /* ── Animations ── */
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  @keyframes fade-in-up {
+    from { opacity: 0; transform: translateY(14px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes slide-in-top {
+    from { opacity: 0; transform: translateY(-10px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes slide-in-left {
+    from { opacity: 0; transform: translateX(-14px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+  @keyframes shimmer {
+    0%   { background-position: -200% 0; }
+    100% { background-position:  200% 0; }
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0)    scale(1); }
+    50%       { transform: translateY(-18px) scale(1.04); }
+  }
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(10px) scale(0.96); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes toast-out {
+    from { opacity: 1; transform: translateY(0) scale(1); }
+    to   { opacity: 0; transform: translateY(6px) scale(0.97); }
+  }
+  @keyframes spin-slow {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  .animate-fade-in       { animation: fade-in       0.35s ease-out forwards; }
+  .animate-fade-in-up    { animation: fade-in-up    0.4s  ease-out forwards; }
+  .animate-slide-in      { animation: slide-in-top  0.3s  ease-out forwards; }
+  .animate-slide-in-left { animation: slide-in-left 0.3s  ease-out forwards; }
+  .animate-float         { animation: float         7s    ease-in-out infinite; }
+  .animate-toast-in      { animation: toast-in      0.28s cubic-bezier(0.16,1,0.3,1) forwards; }
+  .animate-toast-out     { animation: toast-out     0.2s  ease-in forwards; }
+  .animate-spin-slow     { animation: spin-slow     8s    linear infinite; }
+  .animate-shimmer {
+    animation: shimmer 2.4s ease-in-out infinite;
+    background-size: 200% 100%;
+  }
+
+  /* Battery deadline warning flash */
+  @keyframes battery-flash {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  @keyframes pulse-subtle {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+  .animate-battery-flash { animation: battery-flash 1s ease-in-out infinite; }
+  .animate-pulse-subtle  { animation: pulse-subtle 2s ease-in-out infinite; }
+
+  /* Stagger delays */
+  .delay-75  { animation-delay:  75ms; }
+  .delay-150 { animation-delay: 150ms; }
+  .delay-225 { animation-delay: 225ms; }
+  .delay-300 { animation-delay: 300ms; }
+}
